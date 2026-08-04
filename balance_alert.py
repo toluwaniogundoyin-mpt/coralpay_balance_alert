@@ -42,8 +42,9 @@ SEL_PASSWORD = "input[name='password'], input[type='password'], #password"
 SEL_LOGIN_BTN = "button[type='submit'], button:has-text('Login'), button:has-text('Sign in')"
 SEL_OTP = "input[name='otp'], input[name='code'], input[type='tel'], input[autocomplete='one-time-code']"
 SEL_OTP_BTN = "button[type='submit'], button:has-text('Verify'), button:has-text('Submit')"
-# On /wallets — the element that contains the balance amount.
-SEL_BALANCE = "[class*='balance'], [data-testid*='balance'], .wallet-balance"
+# On /wallets — the <h6> whose text reads "Balance : ₦...". Anchored on the
+# text because the CSS classes (text-white, ps-3) are generic Bootstrap utils.
+SEL_BALANCE = "h6:has-text('Balance')"
 
 
 # status -> (emoji, headline) for the alert card
@@ -110,36 +111,57 @@ def parse_amount(raw: str):
     return float(m.group()) if m else None
 
 
+def _dump_debug(page) -> None:
+    """On failure, record where we actually ended up (safe: URL/title to logs)
+    and save a screenshot + HTML for inspection."""
+    try:
+        print(f"[debug] final url:   {page.url}")
+        print(f"[debug] page title:  {page.title()}")
+        page.screenshot(path="debug.png", full_page=True)
+        with open("debug.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        print("[debug] saved debug.png and debug.html")
+    except Exception as e:  # noqa: BLE001
+        print(f"[debug] could not capture debug artifacts: {e}")
+
+
 def fetch_balance() -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not HEADFUL)
         ctx = browser.new_context()
         page = ctx.new_page()
-
-        # 1) Login page
-        page.goto(f"{URL}/", wait_until="networkidle")
-        page.fill(SEL_USERNAME, USERNAME)
-        page.fill(SEL_PASSWORD, PASSWORD)
-        page.click(SEL_LOGIN_BTN)
-
-        # 2) TOTP / Google Authenticator step
         try:
-            page.wait_for_selector(SEL_OTP, timeout=15000)
-            code = pyotp.TOTP(TOTP_SECRET).now()
-            page.fill(SEL_OTP, code)
-            page.click(SEL_OTP_BTN)
-        except PWTimeout:
-            # No OTP field appeared — maybe already past 2FA, continue.
-            pass
+            # 1) Login page
+            page.goto(f"{URL}/", wait_until="networkidle")
+            page.fill(SEL_USERNAME, USERNAME)
+            page.fill(SEL_PASSWORD, PASSWORD)
+            page.click(SEL_LOGIN_BTN)
 
-        # 3) Wallets page
-        page.wait_for_load_state("networkidle")
-        page.goto(f"{URL}/wallets", wait_until="networkidle")
-        page.wait_for_selector(SEL_BALANCE, timeout=20000)
-        raw = page.locator(SEL_BALANCE).first.inner_text().strip()
+            # 2) TOTP / Google Authenticator step
+            try:
+                page.wait_for_selector(SEL_OTP, timeout=15000)
+                code = pyotp.TOTP(TOTP_SECRET).now()
+                page.fill(SEL_OTP, code)
+                page.click(SEL_OTP_BTN)
+            except PWTimeout:
+                # No OTP field appeared — maybe already past 2FA, continue.
+                pass
 
-        browser.close()
-        return raw
+            # 3) Wallets page
+            page.wait_for_load_state("networkidle")
+            page.goto(f"{URL}/wallets", wait_until="networkidle")
+            page.wait_for_selector(SEL_BALANCE, timeout=20000)
+            text = page.locator(SEL_BALANCE).first.inner_text()
+            # Normalise: drop &nbsp;, collapse whitespace, strip the "Balance :" label.
+            text = text.replace("\xa0", " ")
+            text = re.sub(r"\s+", " ", text).strip()
+            raw = re.sub(r"(?i)^balance\s*:?\s*", "", text).strip()
+            return raw
+        except Exception:
+            _dump_debug(page)
+            raise
+        finally:
+            browser.close()
 
 
 def main() -> int:
