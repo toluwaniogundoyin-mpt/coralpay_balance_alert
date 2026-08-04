@@ -1,4 +1,0 @@
-playwright>=1.44
-pyotp>=2.9
-requests>=2.31
-python-dotenv>=1.0
