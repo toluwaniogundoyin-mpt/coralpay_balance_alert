@@ -10,9 +10,11 @@ adjust the SELECTORS below to match the real DOM (right-click -> Inspect).
 Once it works headful, set HEADFUL=0 and schedule it.
 """
 
+import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pyotp
@@ -30,7 +32,17 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 THRESHOLD = os.environ.get("BALANCE_THRESHOLD", "").strip()
+PAGERDUTY_ROUTING_KEY = os.environ.get("PAGERDUTY_ROUTING_KEY", "").strip()
 HEADFUL = os.environ.get("HEADFUL", "0") == "1"
+
+# Stable dedup key so repeated events map to the same PagerDuty incident.
+PD_KEY_LOW = "coralpay-balance-low"
+# Persistent latch across runs: remembers whether we've already paged for the
+# CURRENT low episode, so we page once and don't re-page until the balance recovers.
+STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+# Auto-resolve the ticket this many seconds after paging (keeps MTTR clean).
+# The latch stays set, so it won't re-page until the balance actually recovers.
+AUTO_RESOLVE_SECONDS = int(os.environ.get("AUTO_RESOLVE_SECONDS", "300"))
 
 # ---------------------------------------------------------------------------
 # SELECTORS — the ONLY part likely to need tweaking for the real site.
@@ -84,6 +96,49 @@ def _slack_blocks(status: str, balance: str, threshold: str, detail: str) -> lis
             {"type": "mrkdwn", "text": f":clock3: Checked {_timestamp()}"},
         ]},
     ]
+
+
+def pagerduty(action: str, dedup_key: str, summary: str = "", severity: str = "warning",
+              details: dict = None) -> None:
+    """Send a PagerDuty Events API v2 event (trigger / resolve).
+
+    'trigger' opens (or updates) an incident keyed by dedup_key; 'resolve'
+    closes the incident with that same key. No-op if no routing key is set.
+    """
+    if not PAGERDUTY_ROUTING_KEY:
+        return
+    event = {
+        "routing_key": PAGERDUTY_ROUTING_KEY,
+        "event_action": action,
+        "dedup_key": dedup_key,
+    }
+    if action == "trigger":
+        payload = {
+            "summary": summary[:1024],          # PD caps summary length
+            "severity": severity,               # critical | error | warning | info
+            "source": "cipportal.coralpay.com",
+            "component": "wallet-balance",
+        }
+        if details:
+            payload["custom_details"] = details  # renders as a key/value panel in PD
+        event["payload"] = payload
+    r = requests.post("https://events.pagerduty.com/v2/enqueue", json=event, timeout=20)
+    r.raise_for_status()
+    print(f"[info] PagerDuty {action} ({dedup_key})")
+
+
+def load_state() -> dict:
+    """Read the persisted latch. Missing/corrupt file -> not yet paged."""
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"paged": False}
+
+
+def save_state(state: dict) -> None:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
 
 
 def notify(status: str, balance: str = "—", threshold: str = "", detail: str = "") -> None:
@@ -194,10 +249,41 @@ def main() -> int:
         except ValueError:
             print(f"[warn] BALANCE_THRESHOLD {THRESHOLD!r} is not a number; ignoring.")
 
-    if limit is not None and amount is not None and amount < limit:
+    is_low = limit is not None and amount is not None and amount < limit
+
+    # Edge-triggered PagerDuty: page once when we cross into low, then stay latched
+    # until the balance recovers (funded). The latch survives across runs via STATE_FILE.
+    state = load_state()
+    already_paged = state.get("paged", False)
+
+    if is_low:
         notify("low", balance=raw, threshold=threshold_display)
+        if not already_paged:
+            summary = f"CoralPay wallet balance LOW — Current: {raw}, Threshold: {threshold_display}, Site: CoralPay"
+            details = {
+                "current_balance": raw,
+                "threshold": threshold_display or "not set",
+                "site": "CoralPay",
+                "wallet_url": f"{URL}/wallets",
+                "checked_at": _timestamp(),
+            }
+            pagerduty("trigger", PD_KEY_LOW, summary, "critical", details=details)
+            # Latch BEFORE the wait so we never re-page even if the run is interrupted.
+            save_state({"paged": True})
+            print("[info] Low balance: opened PagerDuty incident and latched.")
+            if AUTO_RESOLVE_SECONDS > 0:
+                print(f"[info] Waiting {AUTO_RESOLVE_SECONDS}s, then auto-resolving the ticket.")
+                time.sleep(AUTO_RESOLVE_SECONDS)
+                pagerduty("resolve", PD_KEY_LOW)
+                print("[info] Auto-resolved ticket; latch stays set until balance recovers.")
+        else:
+            print("[info] Low balance: already paged this episode; not re-paging.")
     else:
         notify("ok", balance=raw, threshold=threshold_display)
+        if already_paged:
+            pagerduty("resolve", PD_KEY_LOW)   # idempotent if already auto-resolved
+            save_state({"paged": False})
+            print("[info] Balance recovered: resolved PagerDuty incident and reset latch.")
 
     return 0
 
