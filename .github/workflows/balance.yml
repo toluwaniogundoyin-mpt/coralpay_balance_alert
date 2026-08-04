@@ -1,12 +1,20 @@
 name: CoralPay balance alert
 
 on:
-  workflow_dispatch:               # lets you run it manually from the Actions tab
+  workflow_dispatch:               # triggered every 15 min by cron-job.org (and manual runs)
+
+permissions:
+  contents: write                  # so the run can commit the state.json latch back to the repo
 
 jobs:
   check-balance:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Allows for the ~5-min auto-resolve wait after a page, plus the browser work.
+    timeout-minutes: 12
+    # Avoid two runs racing on the state file if one overruns.
+    concurrency:
+      group: balance-check
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -29,5 +37,34 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           BALANCE_THRESHOLD: ${{ secrets.BALANCE_THRESHOLD }}
+          PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
           HEADFUL: "0"
         run: python balance_alert.py
+
+      # Persist the paged/not-paged latch. Only commits when it actually changes
+      # (i.e. on the low<->recovered transitions), so history stays quiet.
+      - name: Persist state latch
+        if: always()
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git config user.name "balance-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: update balance alert latch [skip ci]"
+            git push
+          else
+            echo "No state change; nothing to commit."
+          fi
+
+      # If the run fails, save the screenshot + HTML so we can see the page.
+      # NOTE: on a PUBLIC repo these artifacts are downloadable by anyone who can
+      # view the run, and may show your balance. Keep the repo PRIVATE while debugging.
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: |
+            debug.png
+            debug.html
+          if-no-files-found: ignore
