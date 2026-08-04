@@ -175,15 +175,16 @@ def main() -> int:
     amount = parse_amount(raw)
     print(f"[info] Balance read: {raw!r} -> {amount}")
 
+    # Always send the balance. If a threshold is set, flag it red when below.
+    limit = None
     if THRESHOLD:
         try:
             limit = float(THRESHOLD)
         except ValueError:
-            limit = None
-        if limit is not None and amount is not None and amount < limit:
-            notify("low", balance=raw, detail=f"below threshold {THRESHOLD}")
-        else:
-            print("[info] Above threshold; no alert sent.")
+            print(f"[warn] BALANCE_THRESHOLD {THRESHOLD!r} is not a number; ignoring.")
+
+    if limit is not None and amount is not None and amount < limit:
+        notify("low", balance=raw, detail=f"below threshold {THRESHOLD}")
     else:
         notify("ok", balance=raw)
 
