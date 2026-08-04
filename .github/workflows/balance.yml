@@ -1,8 +1,6 @@
 name: CoralPay balance alert
 
 on:
-  schedule:
-    - cron: "3,18,33,48 * * * *"   # every 15 min, offset to dodge congestion
   workflow_dispatch:               # lets you run it manually from the Actions tab
 
 jobs:
