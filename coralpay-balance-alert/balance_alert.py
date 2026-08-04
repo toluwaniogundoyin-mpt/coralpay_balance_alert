@@ -13,6 +13,8 @@ Once it works headful, set HEADFUL=0 and schedule it.
 import os
 import re
 import sys
+from datetime import datetime, timezone
+
 import pyotp
 import requests
 from dotenv import load_dotenv
@@ -44,23 +46,62 @@ SEL_OTP_BTN = "button[type='submit'], button:has-text('Verify'), button:has-text
 SEL_BALANCE = "[class*='balance'], [data-testid*='balance'], .wallet-balance"
 
 
-def notify(text: str) -> None:
-    """Send the message to whichever channel is configured."""
+# status -> (emoji, headline) for the alert card
+_STATUS = {
+    "ok": (":large_green_circle:", "Wallet balance"),
+    "low": (":red_circle:", "LOW wallet balance"),
+    "error": (":rotating_light:", "Balance check FAILED"),
+}
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _slack_blocks(status: str, balance: str, detail: str) -> list:
+    """Build a Block Kit alert card."""
+    emoji, headline = _STATUS[status]
+    fields = [{"type": "mrkdwn", "text": f"*Balance:*\n{balance}"}]
+    if detail:
+        fields.append({"type": "mrkdwn", "text": f"*Note:*\n{detail}"})
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": f"{emoji} CoralPay CIP"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{headline}*"}},
+        {"type": "section", "fields": fields},
+        {"type": "context", "elements": [
+            {"type": "mrkdwn", "text": f":clock3: Checked {_timestamp()}"},
+        ]},
+    ]
+
+
+def notify(status: str, balance: str = "—", detail: str = "") -> None:
+    """Send a formatted alert card to whichever channel is configured."""
+    emoji, headline = _STATUS[status]
+    # Plain-text fallback (used by Telegram, and by Slack notifications/previews).
+    fallback = f"{emoji} CoralPay CIP — {headline}: {balance}"
+    if detail:
+        fallback += f" ({detail})"
+    fallback += f" · {_timestamp()}"
+
     sent = False
     if SLACK_WEBHOOK_URL:
-        r = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=20)
+        r = requests.post(
+            SLACK_WEBHOOK_URL,
+            json={"text": fallback, "blocks": _slack_blocks(status, balance, detail)},
+            timeout=20,
+        )
         r.raise_for_status()
         sent = True
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": fallback},
             timeout=20,
         )
         r.raise_for_status()
         sent = True
     if not sent:
-        print("[warn] No alert channel configured; message was:\n" + text)
+        print("[warn] No alert channel configured; message was:\n" + fallback)
 
 
 def parse_amount(raw: str):
@@ -105,7 +146,7 @@ def main() -> int:
     try:
         raw = fetch_balance()
     except Exception as e:  # noqa: BLE001
-        notify(f":rotating_light: CoralPay balance check FAILED: {e}")
+        notify("error", detail=str(e))
         print(f"[error] {e}", file=sys.stderr)
         return 1
 
@@ -118,11 +159,11 @@ def main() -> int:
         except ValueError:
             limit = None
         if limit is not None and amount is not None and amount < limit:
-            notify(f":warning: CoralPay wallet balance LOW: {raw} (below {THRESHOLD})")
+            notify("low", balance=raw, detail=f"below threshold {THRESHOLD}")
         else:
             print("[info] Above threshold; no alert sent.")
     else:
-        notify(f"CoralPay wallet balance: {raw}")
+        notify("ok", balance=raw)
 
     return 0
 
