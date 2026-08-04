@@ -1,0 +1,35 @@
+name: CoralPay balance alert
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes, 24/7, all week
+  workflow_dispatch:               # lets you run it manually from the Actions tab
+
+jobs:
+  check-balance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run balance check
+        env:
+          CORALPAY_URL: https://cipportal.coralpay.com
+          CORALPAY_USERNAME: ${{ secrets.CORALPAY_USERNAME }}
+          CORALPAY_PASSWORD: ${{ secrets.CORALPAY_PASSWORD }}
+          CORALPAY_TOTP_SECRET: ${{ secrets.CORALPAY_TOTP_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BALANCE_THRESHOLD: ${{ secrets.BALANCE_THRESHOLD }}
+          HEADFUL: "0"
+        run: python balance_alert.py
