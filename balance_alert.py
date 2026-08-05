@@ -176,15 +176,57 @@ def parse_amount(raw: str):
 
 
 def _dump_debug(page) -> None:
-    """On failure, record where we actually ended up (safe: URL/title to logs)
-    and save a screenshot + HTML for inspection."""
+    """On failure, save debug artifacts with EVERYTHING redacted except the first
+    balance. All other text — other amounts, account numbers, names, etc. — is
+    blurred in the screenshot and blanked in the HTML (tags/structure kept for
+    selector debugging). If redaction can't be applied, the artifact is skipped
+    rather than leaked."""
     try:
         print(f"[debug] final url:   {page.url}")
         print(f"[debug] page title:  {page.title()}")
-        page.screenshot(path="debug.png", full_page=True)
-        with open("debug.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-        print("[debug] saved debug.png and debug.html")
+
+        # Mark the first balance so redaction leaves just that one readable.
+        try:
+            bal = page.locator(SEL_BALANCE).first
+            if bal.count() > 0:
+                bal.evaluate("el => el.setAttribute('data-keep', '1')")
+        except Exception as e:  # noqa: BLE001
+            print(f"[debug] no balance element to keep visible: {e}")
+
+        # Screenshot: blur ALL text, then un-blur only the kept balance (green).
+        try:
+            page.add_style_tag(content=(
+                "*{color:transparent !important;"
+                "text-shadow:0 0 10px rgba(90,90,90,.95) !important;}"
+                "[data-keep],[data-keep] *{color:#00c853 !important;text-shadow:none !important;}"
+            ))
+            page.screenshot(path="debug.png", full_page=True)
+            print("[debug] saved redacted debug.png")
+        except Exception as e:  # noqa: BLE001
+            print(f"[debug] screenshot redaction failed; skipping screenshot: {e}")
+
+        # HTML: keep tags/attributes for selector debugging, but blank every text
+        # node and input value except inside the kept balance.
+        try:
+            html = page.evaluate(
+                """() => {
+                    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    const ns = []; while (w.nextNode()) ns.push(w.currentNode);
+                    ns.forEach(n => {
+                        if (n.parentElement && n.parentElement.closest('[data-keep]')) return;
+                        if (n.nodeValue && n.nodeValue.trim()) n.nodeValue = '[REDACTED]';
+                    });
+                    document.querySelectorAll('input,textarea').forEach(i => {
+                        if (!i.closest('[data-keep]')) i.setAttribute('value', '');
+                    });
+                    return document.documentElement.outerHTML;
+                }"""
+            )
+            with open("debug.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print("[debug] saved redacted debug.html")
+        except Exception as e:  # noqa: BLE001
+            print(f"[debug] HTML redaction failed; skipping HTML: {e}")
     except Exception as e:  # noqa: BLE001
         print(f"[debug] could not capture debug artifacts: {e}")
 
