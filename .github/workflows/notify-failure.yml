@@ -1,0 +1,34 @@
+name: Notify on run failure
+
+# Fires when the balance workflow finishes with any non-success result
+# (failure, cancelled, timed_out). Runs as its OWN workflow so it can report
+# even when the balance run was cancelled before a runner ever picked it up
+# (e.g. during GitHub Actions capacity/degradation windows).
+on:
+  workflow_run:
+    workflows: ["CoralPay balance alert"]
+    types: [completed]
+
+jobs:
+  notify:
+    # Only infra-type non-completions. Genuine scraper errors surface a run with
+    # conclusion 'failure' AND the script posts its own 🚨 card, so we skip those
+    # here to avoid double-notifying.
+    if: ${{ github.event.workflow_run.conclusion == 'cancelled' || github.event.workflow_run.conclusion == 'timed_out' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post Slack heads-up (not a page)
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          read -r -d '' TEXT <<EOF || true
+          :warning: *CoralPay balance check did not complete* — result: \`${CONCLUSION}\`.
+          This is usually GitHub Actions degradation (runner capacity).
+          :point_right: *Please check the wallet balance MANUALLY until the monitor is back online:* https://cipportal.coralpay.com/wallets
+          The next scheduled check will retry automatically.
+          EOF
+          curl -sf -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            --data "$(jq -n --arg t "$TEXT" '{text:$t}')"
