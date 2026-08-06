@@ -257,6 +257,25 @@ def fetch_balance() -> str:
             page.wait_for_load_state("networkidle")
             page.goto(f"{URL}/wallets", wait_until="networkidle")
             page.wait_for_selector(SEL_BALANCE, timeout=20000)
+
+            # The balance loads via AJAX AFTER the element renders, so it briefly
+            # shows a placeholder (₦0.00 / empty). Wait until it shows a real,
+            # non-zero amount. If the account is genuinely 0 this times out and we
+            # read it as-is — so a true zero still works, just a few seconds slower.
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const el = [...document.querySelectorAll('h6')]
+                            .find(e => /balance/i.test(e.textContent));
+                        if (!el) return false;
+                        const n = parseFloat(el.textContent.replace(/[^0-9.]/g, ''));
+                        return !isNaN(n) && n > 0;
+                    }""",
+                    timeout=15000,
+                )
+            except PWTimeout:
+                print("[warn] balance still 0/empty after wait; reading as-is")
+
             text = page.locator(SEL_BALANCE).first.inner_text()
             # Normalise: drop &nbsp;, collapse whitespace, strip the "Balance :" label.
             text = text.replace("\xa0", " ")
