@@ -177,10 +177,10 @@ def parse_amount(raw: str):
 
 def _dump_debug(page) -> None:
     """On failure, save debug artifacts with EVERYTHING redacted except the first
-    balance. All other text — other amounts, account numbers, names, etc. — is
-    blurred in the screenshot and blanked in the HTML (tags/structure kept for
-    selector debugging). If redaction can't be applied, the artifact is skipped
-    rather than leaked."""
+    balance. Redaction is done by BLANKING the actual DOM text (not via CSS, which
+    a site's own !important rules can override) — so no page styling can defeat it.
+    The same redacted DOM is used for both the screenshot and the HTML dump. If
+    redaction can't be applied, the artifacts are skipped rather than leaked."""
     try:
         print(f"[debug] final url:   {page.url}")
         print(f"[debug] page title:  {page.title()}")
@@ -193,20 +193,8 @@ def _dump_debug(page) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"[debug] no balance element to keep visible: {e}")
 
-        # Screenshot: blur ALL text, then un-blur only the kept balance (green).
-        try:
-            page.add_style_tag(content=(
-                "*{color:transparent !important;"
-                "text-shadow:0 0 10px rgba(90,90,90,.95) !important;}"
-                "[data-keep],[data-keep] *{color:#00c853 !important;text-shadow:none !important;}"
-            ))
-            page.screenshot(path="debug.png", full_page=True)
-            print("[debug] saved redacted debug.png")
-        except Exception as e:  # noqa: BLE001
-            print(f"[debug] screenshot redaction failed; skipping screenshot: {e}")
-
-        # HTML: keep tags/attributes for selector debugging, but blank every text
-        # node and input value except inside the kept balance.
+        # Blank every text node + input/placeholder EXCEPT inside the kept balance.
+        # Returns the redacted outerHTML so the screenshot and HTML match exactly.
         try:
             html = page.evaluate(
                 """() => {
@@ -216,17 +204,33 @@ def _dump_debug(page) -> None:
                         if (n.parentElement && n.parentElement.closest('[data-keep]')) return;
                         if (n.nodeValue && n.nodeValue.trim()) n.nodeValue = '[REDACTED]';
                     });
-                    document.querySelectorAll('input,textarea').forEach(i => {
-                        if (!i.closest('[data-keep]')) i.setAttribute('value', '');
+                    document.querySelectorAll('input,textarea,select').forEach(i => {
+                        if (i.closest('[data-keep]')) return;
+                        try { i.value = ''; } catch (e) {}
+                        i.setAttribute('value', '');
+                        if (i.hasAttribute('placeholder')) i.setAttribute('placeholder', '');
                     });
                     return document.documentElement.outerHTML;
                 }"""
             )
+        except Exception as e:  # noqa: BLE001
+            # Could not redact -> do NOT capture anything, to avoid leaking data.
+            print(f"[debug] redaction failed; skipping ALL artifacts to avoid leak: {e}")
+            return
+
+        # Screenshot the already-redacted DOM.
+        try:
+            page.screenshot(path="debug.png", full_page=True)
+            print("[debug] saved redacted debug.png")
+        except Exception as e:  # noqa: BLE001
+            print(f"[debug] could not save screenshot: {e}")
+
+        try:
             with open("debug.html", "w", encoding="utf-8") as f:
                 f.write(html)
             print("[debug] saved redacted debug.html")
         except Exception as e:  # noqa: BLE001
-            print(f"[debug] HTML redaction failed; skipping HTML: {e}")
+            print(f"[debug] could not write html: {e}")
     except Exception as e:  # noqa: BLE001
         print(f"[debug] could not capture debug artifacts: {e}")
 
