@@ -5,9 +5,6 @@ CoralPay CIP portal — automated wallet balance alert.
 Logs in with username/password + Google Authenticator (TOTP), reads the balance
 from /wallets, and pushes an alert to Slack or Telegram.
 
-First run: set HEADFUL=1 in .env and run this script so you can SEE the page and
-adjust the SELECTORS below to match the real DOM (right-click -> Inspect).
-Once it works headful, set HEADFUL=0 and schedule it.
 """
 
 import json
