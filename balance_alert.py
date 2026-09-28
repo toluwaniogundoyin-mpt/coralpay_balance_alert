@@ -242,11 +242,25 @@ def _dump_debug(page, label: str = "debug") -> None:
             inputs = page.eval_on_selector_all(
                 "input",
                 "els => els.map(e => ({name: e.name, id: e.id, type: e.type, "
-                "placeholder: e.placeholder, visible: !!(e.offsetWidth || e.offsetHeight)}))",
+                "placeholder: e.placeholder, value: e.type === 'password' ? '(hidden)' : e.value, "
+                "visible: !!(e.offsetWidth || e.offsetHeight)}))",
             )
             print(f"[{label}] <input> elements on page: {inputs}")
         except Exception as e:  # noqa: BLE001
             print(f"[{label}] could not enumerate inputs: {e}")
+
+        # Every <button> actually present — confirms whether SEL_LOGIN_BTN/SEL_OTP_BTN
+        # matched the real submit control, vs. e.g. a button with no explicit
+        # type='submit' attribute (which our attribute selector would silently miss).
+        try:
+            buttons = page.eval_on_selector_all(
+                "button",
+                "els => els.map(e => ({text: e.textContent.trim(), type: e.type, "
+                "disabled: e.disabled, visible: !!(e.offsetWidth || e.offsetHeight)}))",
+            )
+            print(f"[{label}] <button> elements on page: {buttons}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[{label}] could not enumerate buttons: {e}")
 
         # Iframes can hide the real form behind a challenge/consent overlay.
         try:
@@ -284,6 +298,12 @@ def fetch_balance() -> tuple:
         page.on("console", lambda msg: print(f"[console:{msg.type}] {msg.text}"))
         page.on("response", lambda resp: print(f"[net] {resp.status} {resp.url}")
                 if resp.status >= 400 else None)
+        # POST responses are logged regardless of status — a login that gets silently
+        # rejected (e.g. by an anti-fraud check) typically still returns 200/302 and
+        # just re-renders the signin page, so the >=400 filter above wouldn't catch it.
+        # This is the only way to see whether the login POST even happened.
+        page.on("response", lambda resp: print(f"[net:post] {resp.status} {resp.url}")
+                if resp.request.method == "POST" else None)
         try:
             # 1) Login page
             # domcontentloaded, not networkidle: the portal has background network
@@ -309,6 +329,28 @@ def fetch_balance() -> tuple:
                           f"retrying once")
             page.fill(SEL_USERNAME, USERNAME)
             page.fill(SEL_PASSWORD, PASSWORD)
+
+            # The hidden IpAddress field (#ipInput) is very likely populated by
+            # client-side JS (e.g. a call to an IP-lookup service) before the form is
+            # considered safe to submit. If it's still empty when we click, the
+            # backend may silently reject the login and just re-render the same
+            # signin page with no visible error — which matches the observed symptom
+            # of "click succeeds, but we're bounced straight back to signin". Give it
+            # a few seconds to populate, then log whatever we ended up with either way.
+            try:
+                page.wait_for_function(
+                    "() => { const el = document.querySelector(\"input[name='IpAddress']\"); "
+                    "return el && el.value && el.value.length > 0; }",
+                    timeout=8000,
+                )
+            except PWTimeout:
+                pass
+            try:
+                ip_value = page.eval_on_selector("input[name='IpAddress']", "el => el.value")
+                print(f"[debug] IpAddress hidden field value before submit: {ip_value!r}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[debug] could not read IpAddress field: {e}")
+
             page.click(SEL_LOGIN_BTN)
 
             # Wait for login form to be processed — either OTP appears or we navigate away
