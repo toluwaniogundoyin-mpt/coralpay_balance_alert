@@ -311,14 +311,27 @@ def fetch_balance() -> tuple:
             page.fill(SEL_PASSWORD, PASSWORD)
             page.click(SEL_LOGIN_BTN)
 
+            # Wait for login form to be processed — either OTP appears or we navigate away
+            # from signin page. Don't proceed until one of these happens.
+            try:
+                page.wait_for_url(lambda url: "signin" not in url.lower(), timeout=15000)
+                print("[info] Login form submitted; navigated away from signin page.")
+            except PWTimeout:
+                # Still on signin page after 15s — login failed or stuck
+                print("[warn] Still on signin page after 15s; checking for OTP field...")
+
             # 2) TOTP / Google Authenticator step
             try:
-                page.wait_for_selector(SEL_OTP, timeout=15000)
+                page.wait_for_selector(SEL_OTP, timeout=10000)
                 code = pyotp.TOTP(TOTP_SECRET).now()
                 page.fill(SEL_OTP, code)
                 page.click(SEL_OTP_BTN)
+                # Wait for OTP to be processed
+                page.wait_for_url(lambda url: "signin" not in url.lower(), timeout=10000)
+                print("[info] OTP submitted; navigated away from signin page.")
             except PWTimeout:
-                # No OTP field appeared — maybe already past 2FA, continue.
+                # No OTP field appeared or OTP submission didn't navigate — continue.
+                print("[info] No OTP field or already past 2FA; continuing to wallets...")
                 pass
 
             # 3) Wallets page (see domcontentloaded note above). This specific page has
