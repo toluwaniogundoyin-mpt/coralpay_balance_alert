@@ -1,0 +1,69 @@
+name: CoralPay Balance Alert
+
+on:
+  schedule:
+    # Run every 15 minutes
+    - cron: '0 */15 * * *'
+  workflow_dispatch:
+
+jobs:
+  balance-check:
+    name: Check balance and alert
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install chromium
+
+      - name: Run balance check
+        env:
+          CORALPAY_URL: ${{ secrets.CORALPAY_URL }}
+          CORALPAY_USERNAME: ${{ secrets.CORALPAY_USERNAME }}
+          CORALPAY_PASSWORD: ${{ secrets.CORALPAY_PASSWORD }}
+          CORALPAY_TOTP_SECRET: ${{ secrets.CORALPAY_TOTP_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
+          BALANCE_THRESHOLD: ${{ secrets.BALANCE_THRESHOLD }}
+          BALANCE_WARNING_THRESHOLD: ${{ secrets.BALANCE_WARNING_THRESHOLD }}
+          STATE_URL: ${{ secrets.STATE_URL }}
+          AUTO_RESOLVE_SECONDS: '300'
+          UNREACHABLE_REMINDER_SECONDS: '1800'
+          HEADFUL: '0'
+        run: python balance_alert.py
+
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "⚠️ CoralPay balance check workflow failed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ":rotating_light: CoralPay Balance Check Failed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "The automated balance check failed to complete.\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>"
+                  }
+                }
+              ]
+            }
